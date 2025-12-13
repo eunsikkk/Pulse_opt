@@ -1,0 +1,311 @@
+% =========================================================================
+% COMSOL-MATLAB: CCCV Baseline + Pulse Grid (fixed SOC window)
+%
+%  Fixed SOC window (BEST from stage-1):
+%    pstart = 0.2, pend = 0.5  -> S2_start=0.2, S2_dur=0.3
+%
+%  Grid (stage-2):
+%    - C-rate (CCCV): 3.83 ~ 6.0 (10 points)   [OUTER LOOP]
+%    - Period:        1 ~ 100 s (logspace, 10)
+%    - Duty:          0.5 ~ 0.9 (linspace, 10)
+%    - Rest:          0 fixed
+%    - pulse_stage_mode: baseline=0, pulse=1
+%
+%  Study/Dataset:
+%    - Baseline CCCV: std1 / dset1  (pulse OFF)
+%    - Pulse runs:    std3 / dset37 (pulse ON)
+% =========================================================================
+clc; clear; close all;
+import com.comsol.model.*
+import com.comsol.model.util.*
+
+%% 0) Output folder --------------------------------------------------------
+fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
+assert(isfolder(fileparts(fig_base_dir)) || isfolder(fig_base_dir), ...
+    'Figure 상위 폴더가 유효하지 않습니다.');
+ts = datestr(now,'yyyymmdd_HHMMSS');
+out_dir = fullfile(fig_base_dir, ['pulse_grid_CCCV_stage2_' ts]);
+if ~isfolder(out_dir), mkdir(out_dir); end
+
+%% 1) Load model -----------------------------------------------------------
+filepath = 'C:\Users\user\Downloads';
+filename = 'ES_MSCCPC_Final (1).mph';
+full_path = fullfile(filepath, filename);
+assert(isfile(full_path),'mph 파일 없음: %s', full_path);
+
+model = mphload(full_path);
+ModelUtil.showProgress(true);
+disp('모델 불러오기 완료.');
+
+%% 2) Study/Dataset IDs ----------------------------------------------------
+baseline_study_id = 'std1';
+baseline_dset_id  = 'dset1';
+pulse_study_id    = 'std3';
+pulse_dset_id     = 'dset37';
+
+%% 3) Fixed SOC window (BEST) ---------------------------------------------
+pstart_best = 0.2;
+pend_best   = 0.5;
+S2_start_fix = pstart_best;
+S2_dur_fix   = pend_best - pstart_best;   % 0.3
+
+%% 4) Grid lists -----------------------------------------------------------
+Crate_list = linspace(3.83, 6.0, 10);     % OUTER LOOP
+Tper_list  = logspace(0, 2, 10);          % 1~100 s
+duty_list  = linspace(0.5, 0.9, 10);      % 0.5~0.9
+Irest_fixed = 0.0;
+
+N_total = numel(Crate_list) * numel(Tper_list) * numel(duty_list);
+fprintf('총 Grid 케이스 수: %d (Crate x Period x Duty = %d x %d x %d)\n', ...
+    N_total, numel(Crate_list), numel(Tper_list), numel(duty_list));
+
+%% 5) CSV log --------------------------------------------------------------
+fn_grid = fullfile(out_dir, ['cccv_pulse_grid_stage2_' ts '.csv']);
+
+header_cols = {'C_rate', ...
+               'S2_start','S2_dur','pend', ...
+               'pulse_period_s','duty','I_rest', ...
+               'T','s','T_avg','T_max','plating_cap', ...
+               'plating_cap_base','d_plating'};
+init_csv(fn_grid, header_cols);
+
+%% 6) Baseline function: for each C-rate compute baseline (pulse OFF) -----
+% (C-rate sweep이므로 baseline도 C-rate마다 다시 구해야 비교가 의미있음)
+
+cnt = 0;
+tic;
+
+for ic = 1:numel(Crate_list)
+    Crate = Crate_list(ic);
+
+    % --- set CCCV C-rate in COMSOL ---
+    % 모델에서 CCCV 속도가 C_rate로 정의되어 있다고 했으니 set 해야 sweep 됨
+    model.param.set('C_rate', num2str(Crate));
+
+    fprintf('\n===== [C-rate %2d/%2d] C_rate = %.4fC =====\n', ic, numel(Crate_list), Crate);
+
+    % --- Baseline CCCV (pulse OFF) ---
+    model.param.set('pulse_stage_mode',                '0');
+    model.param.set('pulse_rest_current_param_coeffi', '0');
+    model.param.set('duty_cycle',                      '0.5');  % 형식 유지
+    model.param.set('pulse_freq',                      '1[s]'); % 형식 유지
+
+    ok_base = try_run_study(model, baseline_study_id);
+    if ~ok_base
+        warning('Baseline 실패 (C_rate=%.4f) → 해당 C-rate 전체를 skip', Crate);
+        continue;
+    end
+
+    expr = {'t','liion.Ect','liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
+    [ok_eval_base, Dbase] = try_mpheval(model, expr, baseline_dset_id);
+    if ~ok_eval_base
+        warning('Baseline mpheval 실패 (C_rate=%.4f) → 해당 C-rate 전체를 skip', Crate);
+        continue;
+    end
+
+    t_base    = Dbase.d1;
+    over_base = Dbase.d2;
+    cc_base   = Dbase.d3;
+    cv_base   = Dbase.d4;
+
+    idx_base = (cc_base==1)|(cv_base==1);
+    if ~any(idx_base)
+        warning('Baseline CC/CV 구간 없음 (C_rate=%.4f) → skip', Crate);
+        continue;
+    end
+
+    s_base       = min(over_base(idx_base));
+    Tcharge_base = t_base(find(idx_base,1,'last'));
+    [Tavg_base, Tmax_base] = get_T_peaks(model, baseline_dset_id);
+
+    plating_cap_base = NaN;
+    try
+        Gp_base = mpheval(model, 'plating_cap', ...
+                          'dataset',  baseline_dset_id, ...
+                          'edim',     'point', ...
+                          'selection', 2, ...
+                          'solnum',   'all');
+        plating_cap_base = Gp_base.d1(end);
+    catch
+        warning('Baseline plating_cap eval 실패 (C_rate=%.4f) → NaN', Crate);
+    end
+
+    fprintf('Baseline: T=%.2f s, s=%.4f V, Tavg=%.2f, Tmax=%.2f, plating=%.4g\n', ...
+        Tcharge_base, s_base, Tavg_base, Tmax_base, plating_cap_base);
+
+    % (선택) baseline row를 CSV에 남기고 싶으면 아래 주석 해제
+    % rowB = [Crate, S2_start_fix, S2_dur_fix, pend_best, 1, 0.5, Irest_fixed, ...
+    %         Tcharge_base, s_base, Tavg_base, Tmax_base, plating_cap_base, plating_cap_base, 0];
+    % append_grid_row(fn_grid, rowB);
+
+    % --- Pulse grid for this C-rate --------------------------------------
+    for ip = 1:numel(Tper_list)
+        Tper = Tper_list(ip);
+
+        for id = 1:numel(duty_list)
+            duty = duty_list(id);
+
+            cnt = cnt + 1;
+            fprintf('[%4d/%4d] C=%.3f, Tper=%.3f s, duty=%.3f\n', ...
+                cnt, N_total, Crate, Tper, duty);
+
+            eval_CCCV_PULSE_FIXEDWINDOW(model, ...
+                pulse_study_id, pulse_dset_id, ...
+                Crate, ...
+                S2_start_fix, S2_dur_fix, pend_best, ...
+                Irest_fixed, duty, Tper, ...
+                plating_cap_base, fn_grid);
+        end
+    end
+end
+
+toc;
+fprintf('\nGrid 종료. CSV: %s\n', fn_grid);
+
+%% ======================= Local helper functions ==========================
+
+function init_csv(fn, names)
+    if ~isfile(fn)
+        T = cell2table(cell(0,numel(names)), 'VariableNames', names);
+        writetable(T, fn);
+    end
+end
+
+function append_grid_row(fn, row)
+    row = row(:).';
+    T = table( ...
+        row(1), ...
+        row(2), row(3), row(4), ...
+        row(5), row(6), row(7), ...
+        row(8), row(9), row(10), row(11), row(12), ...
+        row(13), row(14), ...
+        'VariableNames', {'C_rate', ...
+                          'S2_start','S2_dur','pend', ...
+                          'pulse_period_s','duty','I_rest', ...
+                          'T','s','T_avg','T_max','plating_cap', ...
+                          'plating_cap_base','d_plating'} );
+    writetable(T, fn, 'WriteMode','Append');
+end
+
+function eval_CCCV_PULSE_FIXEDWINDOW(model, study_id, dset_id, ...
+                                    Crate, ...
+                                    S2_start, S2_dur, pend, ...
+                                    Irest, duty, Tper, ...
+                                    plating_cap_base, fn_csv)
+
+    % --- Set parameters ----------------------------------------------------
+    try
+        % CCCV C-rate already set outside, but keep consistent:
+        model.param.set('C_rate', num2str(Crate));
+
+        % pulse ON
+        model.param.set('pulse_stage_mode',                '1');
+        model.param.set('pulse_rest_current_param_coeffi', num2str(Irest));
+        model.param.set('pulse_freq', [num2str(Tper) '[s]']);
+        model.param.set('duty_cycle', num2str(duty));
+
+        % fixed SOC window
+        model.param.set('S2_start', num2str(S2_start));
+        model.param.set('S2_dur',   num2str(S2_dur));
+    catch ME
+        warning('파라미터 세팅 실패: %s', ME.message);
+        row = [Crate, S2_start, S2_dur, pend, Tper, duty, Irest, ...
+               NaN, NaN, NaN, NaN, NaN, plating_cap_base, NaN];
+        append_grid_row(fn_csv, row);
+        return;
+    end
+
+    % --- Run ---------------------------------------------------------------
+    if ~try_run_study(model, study_id)
+        if ~try_run_study(model, study_id)
+            warning('%s 실행 실패 → NaN 기록', study_id);
+            row = [Crate, S2_start, S2_dur, pend, Tper, duty, Irest, ...
+                   NaN, NaN, NaN, NaN, NaN, plating_cap_base, NaN];
+            append_grid_row(fn_csv, row);
+            return;
+        end
+    end
+
+    % --- Evaluate ----------------------------------------------------------
+    expr = {'t','liion.Ect','liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
+    [ok, D] = try_mpheval(model, expr, dset_id);
+    if ~ok
+        warning('mpheval 실패 → NaN 기록');
+        row = [Crate, S2_start, S2_dur, pend, Tper, duty, Irest, ...
+               NaN, NaN, NaN, NaN, NaN, plating_cap_base, NaN];
+        append_grid_row(fn_csv, row);
+        return;
+    end
+
+    t    = D.d1;
+    ect  = D.d2;
+    cc   = D.d3;
+    cv   = D.d4;
+    idx  = (cc==1)|(cv==1);
+
+    if ~any(idx)
+        warning('CC/CV 구간 없음 → NaN 기록');
+        row = [Crate, S2_start, S2_dur, pend, Tper, duty, Irest, ...
+               NaN, NaN, NaN, NaN, NaN, plating_cap_base, NaN];
+        append_grid_row(fn_csv, row);
+        return;
+    end
+
+    s_val   = min(ect(idx));
+    Tcharge = t(find(idx,1,'last'));
+
+    [Tavg_val, Tmax_val] = get_T_peaks(model, dset_id);
+
+    plating_cap_end = NaN;
+    try
+        Gp = mpheval(model, 'plating_cap', ...
+                     'dataset',  dset_id, ...
+                     'edim',     'point', ...
+                     'selection', 2, ...
+                     'solnum',   'all');
+        plating_cap_end = Gp.d1(end);
+    catch
+        warning('plating_cap 평가 실패 → NaN');
+    end
+
+    d_plating = plating_cap_end - plating_cap_base;
+
+    fprintf('   → T=%.2f s, s=%.4f V, Tavg=%.2f, Tmax=%.2f, plating=%.4g, d_plating=%.4g\n', ...
+        Tcharge, s_val, Tavg_val, Tmax_val, plating_cap_end, d_plating);
+
+    row = [Crate, S2_start, S2_dur, pend, Tper, duty, Irest, ...
+           Tcharge, s_val, Tavg_val, Tmax_val, ...
+           plating_cap_end, plating_cap_base, d_plating];
+    append_grid_row(fn_csv, row);
+end
+
+function ok = try_run_study(model, study_id)
+    ok = true;
+    try
+        model.study(study_id).run();
+    catch
+        ok = false;
+    end
+end
+
+function [ok, D] = try_mpheval(model, exprs, dset)
+    ok = true; D = struct();
+    try
+        D = mpheval(model, exprs, ...
+            'dataset', dset, 'edim','point','selection',2,'solnum','all');
+    catch
+        ok = false;
+    end
+end
+
+function [T_avg_peak, T_max_peak] = get_T_peaks(model, dset)
+    T_avg_peak = nan; T_max_peak = nan;
+    try
+        G = mpheval(model,'T_avg','dataset',dset,'edim','domain','solnum','all');
+        T_avg_peak = max(G.d1(:),[],'omitnan');
+    catch, end
+    try
+        G = mpheval(model,'T_max','dataset',dset,'edim','domain','solnum','all');
+        T_max_peak = max(G.d1(:),[],'omitnan');
+    catch, end
+end
