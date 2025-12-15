@@ -1,3 +1,8 @@
+%% =========================================================================
+%  Triangle map: x = SOC pstart (nominal), y = SOC pend
+%% =========================================================================
+clc; clear; close all;
+
 %% 0) CSV 선택
 base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
 assert(isfolder(base_dir), '폴더가 존재하지 않습니다: %s', base_dir);
@@ -9,7 +14,6 @@ fprintf('선택한 CSV: %s\n', fullpath_csv);
 
 %% 1) CSV 로드
 T = readtable(fullpath_csv);
-%vars = T.Properties.VariableNames;
 
 %% 2) 어떤 값을 색으로 칠할지 선택
 metric_name = 'd_plating';   % 'T', 'T_avg', 'T_max', 's', 'plating_cap' 등으로 바꿔도 됨
@@ -17,11 +21,10 @@ assert(any(strcmp(T.Properties.VariableNames, metric_name)), ...
     'CSV에 %s 컬럼이 없습니다.', metric_name);
 
 %% 3) baseline/더미 행 제거 (pend==0 이거나 NaN 등)
-%   baseline row는 보통 pstart_nom=0, pend=0 형태라서 제거
 valid = ~isnan(T.pstart_nom) & ~isnan(T.pend) & (T.pend > 0);
 T = T(valid, :);
 
-%% 4) grid 축 정의 (너가 쓰는 0.0:0.1:0.9, 0.1:0.1:1.0 기준)
+%% 4) grid 축 정의
 x_list = 0.0:0.1:0.9;  % pstart_nom
 y_list = 0.1:0.1:1.0;  % pend
 
@@ -35,16 +38,15 @@ x = T.pstart_nom;
 y = T.pend;
 v = T.(metric_name);
 
-% 같은 좌표가 있을 경우 마지막 값으로 덮어쓰기
 for k = 1:height(T)
     ix = find(abs(x_list - x(k)) < 1e-12, 1);
     iy = find(abs(y_list - y(k)) < 1e-12, 1);
     if ~isempty(ix) && ~isempty(iy)
-        Z(iy, ix) = v(k);
+        Z(iy, ix) = v(k);   % 같은 좌표가 있으면 마지막 값으로 덮어씀
     end
 end
 
-%% 6) 삼각형 마스크 적용: y <= x 영역은 NaN
+%% 6) 삼각형 마스크 적용: pend <= pstart 영역은 NaN
 [Xg, Yg] = meshgrid(x_list, y_list);
 Z(Yg <= Xg) = nan;
 
@@ -55,31 +57,27 @@ h = imagesc(x_list, y_list, Z);
 set(gca,'YDir','normal');  % y 아래->위 증가
 
 % NaN 영역 투명
-alpha = ~isnan(Z);
-set(h, 'AlphaData', alpha);
+set(h, 'AlphaData', ~isnan(Z));
 
 axis tight;
-axis square;  % 보기 좋게 정사각
+axis square;
 
 xlabel('SOC pstart (nominal)');
 ylabel('SOC pend');
 title(sprintf('Triangle map: %s', metric_name), 'Interpreter','none');
 
-% tick 정리
 xticks(x_list);
 yticks(y_list);
 xlim([min(x_list) max(x_list)]);
 ylim([min(y_list) max(y_list)]);
 
-grid on;
-box on;
+grid on; box on;
 
 cb = colorbar;
 cb.Label.String = metric_name;
 cb.Label.Interpreter = 'none';
 
 %% 8) best/worst 마커(선택)
-% metric이 d_plating면 min이 best(플레이팅 감소), max가 worst라고 가정
 if strcmp(metric_name,'d_plating')
     [minVal, minIdx] = min(Z(:), [], 'omitnan');
     [maxVal, maxIdx] = max(Z(:), [], 'omitnan');
@@ -97,8 +95,8 @@ if strcmp(metric_name,'d_plating')
         'Color','k','FontSize',12,'FontWeight','bold');
 end
 
-%% 9) 저장(선택)
-[out_dir, base_name, ~] = fileparts(csv_path);
-png_path = fullfile(out_dir, sprintf('%s_triangle_%s.png', base_name, metric_name));
+%% 9) 저장
+[out_dir, base_name, ~] = fileparts(fullpath_csv);
+png_path = fullfile(out_dir, sprintf('%s_pstart_pend_%s.png', base_name, metric_name));
 saveas(gcf, png_path);
 fprintf('Saved: %s\n', png_path);
