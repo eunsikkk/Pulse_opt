@@ -1,0 +1,225 @@
+%% =========================================================================
+% Pulse Grid Plot (Heatmap+Markers), CSV Only
+%  - stage / Irest / C-rate 별로 duty-period grid 생성
+%  - 컬럼명 자동매핑: stage_mode 없으면 stage=2로 고정(필요시 변경)
+%  - d_plating_fixedBase 등 자동 인식
+% =========================================================================
+clc; clear; close all;
+
+%% 0) CSV 선택
+base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
+assert(isfolder(base_dir), '폴더가 존재하지 않습니다: %s', base_dir);
+
+[fn, fp] = uigetfile(fullfile(base_dir, '*.csv'), 'Pulse Grid CSV 파일을 선택하세요');
+if isequal(fn,0), error('파일 선택이 취소되었습니다.'); end
+fullpath_csv = fullfile(fp, fn);
+fprintf('선택한 CSV: %s\n', fullpath_csv);
+
+%% 1) CSV 로드
+T = readtable(fullpath_csv);
+vars = T.Properties.VariableNames;
+
+% --- stage ---
+if ismember('stage_mode', vars)
+    stage_all = T.stage_mode(:);
+else
+    % stage_mode 컬럼이 없으면: (지금 파일이 stage2라면) 2로 고정
+    stage_all = 2 * ones(height(T),1);
+end
+
+% --- duty / period ---
+assert(ismember('duty', vars), 'CSV에 duty 컬럼이 없습니다.');
+assert(ismember('pulse_period_s', vars), 'CSV에 pulse_period_s 컬럼이 없습니다.');
+duty_all  = T.duty(:);
+Tper_all  = T.pulse_period_s(:);
+
+% --- d_plating 자동 선택 ---
+if ismember('d_plating', vars)
+    dplat_all = T.d_plating(:);
+elseif ismember('d_plating_fixedBase', vars)
+    dplat_all = T.d_plating_fixedBase(:);
+elseif ismember('d_plating_fixedBase_fixed', vars)
+    dplat_all = T.d_plating_fixedBase_fixed(:);
+else
+    error('d_plating 계열 컬럼(d_plating / d_plating_fixedBase ...)을 찾을 수 없습니다.');
+end
+
+% --- I_rest ---
+if ismember('I_rest', vars)
+    Irest_all = T.I_rest(:);
+elseif ismember('Irest', vars)
+    Irest_all = T.Irest(:);
+else
+    Irest_all = zeros(height(T),1);
+end
+
+% --- charge time(있으면) ---
+if ismember('t_charge', vars)
+    tcharge_all = T.t_charge(:);
+elseif ismember('t_charge_s', vars)
+    tcharge_all = T.t_charge_s(:);
+elseif ismember('tcharge', vars)
+    tcharge_all = T.tcharge(:);
+elseif ismember('T', vars)
+    % 네 파일은 T가 충전시간인 경우가 많음
+    tcharge_all = T.T(:);
+else
+    tcharge_all = nan(height(T),1);
+end
+
+% --- C-rate: 있으면 읽고, 없으면 "블록(100개 단위)"로 가짜 그룹 생성 ---
+Crate_exists = false;
+if ismember('C_rate', vars)
+    Crate_all = T.C_rate(:);  Crate_exists = true;
+elseif ismember('Crate', vars)
+    Crate_all = T.Crate(:);   Crate_exists = true;
+elseif ismember('C', vars)
+    Crate_all = T.C(:);       Crate_exists = true;
+end
+
+% C-rate 컬럼이 없는데, 네가 말한 것처럼 "100개에 한 번 바뀌는" 구조라면:
+% duty_u x Tper_u 포인트 수를 한 블록으로 보고 block_id를 만들 수 있음
+% (아래는 안전하게 100으로 fallback)
+if ~Crate_exists
+    warning('CSV에 C-rate 컬럼이 없어 block_id로 그룹화합니다 (기본=100행 단위).');
+    blockSize = 100;
+    Crate_all = floor(( (1:height(T))' - 1 ) / blockSize) + 1;  % 1,2,3...
+end
+
+%% 2) stage / Irest / Crate 리스트
+stage_list = unique(stage_all);
+Irest_list = unique(Irest_all);
+Crate_list = unique(Crate_all);
+
+subLabelFS = 26;
+stageLabelMap = containers.Map(num2cell(1:7), {'(a)','(b)','(c)','(d)','(e)','(f)','(g)'});
+
+fig_id = 1;
+
+PEAKS = struct('stage',{},'Irest',{},'Crate',{},'duty',{},'Tper',{}, ...
+               'dplat',{},'kind',{},'tcharge',{});
+
+%% 3) stage, Irest, C-rate 별 plot
+for cval = Crate_list'
+for Ival = Irest_list'
+for mode_target = stage_list'
+
+    idx = (stage_all == mode_target) & (Irest_all == Ival) & (Crate_all == cval);
+
+    duty  = duty_all(idx);
+    Tper  = Tper_all(idx);
+    dplat = dplat_all(idx);
+    tchg  = tcharge_all(idx);
+
+    fprintf('\n==============================================\n');
+    if Crate_exists
+        fprintf('>> stage=%d, Irest=%.3g, C-rate=%.3g\n', mode_target, Ival, cval);
+    else
+        fprintf('>> stage=%d, Irest=%.3g, block_id=%d\n', mode_target, Ival, cval);
+    end
+    fprintf('데이터 개수: %d\n', numel(duty));
+
+    if isempty(duty)
+        warning('데이터 없음 -> 스킵');
+        continue;
+    end
+
+    % --- unique grid 생성 ---
+    duty_u = unique(duty);
+    Tper_u = unique(Tper);
+    [DUTY, TPER] = meshgrid(duty_u, Tper_u);
+
+    Z = nan(size(DUTY));
+    Ztchg = nan(size(DUTY));
+
+    % --- 중복 (duty,period) 처리: "더 작은 d_plating" 우선(원하면 mean/median으로 변경 가능) ---
+    for i = 1:numel(duty)
+        rr = (Tper_u == Tper(i));
+        cc = (duty_u == duty(i));
+
+        if isnan(Z(rr,cc)) || dplat(i) < Z(rr,cc)
+            Z(rr,cc)     = dplat(i);
+            Ztchg(rr,cc) = tchg(i);
+        end
+    end
+
+    % --- best/worst ---
+    Z_flat    = Z(:);
+    DUTY_flat = DUTY(:);
+    TPER_flat = TPER(:);
+
+    valid = ~isnan(Z_flat);
+    Zv = Z_flat(valid);
+    Dv = DUTY_flat(valid);
+    Pv = TPER_flat(valid);
+
+    if numel(Zv) < 2
+        warning('유효 포인트 <2 -> peak 스킵');
+        continue;
+    end
+
+    [~, sort_asc]  = sort(Zv, 'ascend');
+    [~, sort_desc] = sort(Zv, 'descend');
+    nb = min(2, numel(Zv));
+    nw = min(2, numel(Zv));
+    best_idx  = sort_asc(1:nb);
+    worst_idx = sort_desc(1:nw);
+
+    % --- PEAKS 저장 (row 찾기는 "대충 1개"만 찾도록) ---
+    for ii = 1:nb
+        PEAKS(end+1) = struct('stage',mode_target,'Irest',Ival,'Crate',cval, ...
+            'duty',Dv(best_idx(ii)),'Tper',Pv(best_idx(ii)), ...
+            'dplat',Zv(best_idx(ii)),'kind',"best",'tcharge',NaN);
+    end
+    for ii = 1:nw
+        PEAKS(end+1) = struct('stage',mode_target,'Irest',Ival,'Crate',cval, ...
+            'duty',Dv(worst_idx(ii)),'Tper',Pv(worst_idx(ii)), ...
+            'dplat',Zv(worst_idx(ii)),'kind',"worst",'tcharge',NaN);
+    end
+
+    %% --- Heatmap + markers ---
+    figure(fig_id); clf; set(gcf,'Color','w'); fig_id = fig_id + 1;
+
+    contourf(DUTY, TPER, Z, 40, 'LineColor','none');
+    colorbar; hold on;
+
+    scatter(Dv(best_idx),  Pv(best_idx), 80, 'g', 'filled', ...
+        'MarkerEdgeColor','k', 'DisplayName','Best (low \DeltaPlating)');
+    scatter(Dv(worst_idx), Pv(worst_idx),60, 'r', 'filled', ...
+        'MarkerEdgeColor','k', 'DisplayName','Worst (high \DeltaPlating)');
+
+    xlabel('Duty');
+    ylabel('Pulse Period (s)');
+    set(gca,'YScale','log','FontSize',14);
+    axis square;
+
+    % 제목에 C-rate 같이 표시
+    % if Crate_exists
+    %     title(sprintf('stage %d | Irest %.3g | C-rate %.3g', mode_target, Ival, cval));
+    % else
+    %     title(sprintf('stage %d | Irest %.3g | block %d', mode_target, Ival, cval));
+    % end
+
+    if isKey(stageLabelMap, mode_target)
+        put_label_outside(gcf, gca, stageLabelMap(mode_target), subLabelFS);
+    end
+    hold off;
+
+end
+end
+end
+
+fprintf('\n총 PEAKS 개수: %d\n', numel(PEAKS));
+
+%% helper
+function put_label_outside(fig_handle, ax_handle, label, subLabelFS)
+    figure(fig_handle);
+    ax_pos = ax_handle.Position;
+    label_x = ax_pos(1) - 0.015;
+    label_y = ax_pos(2) + ax_pos(4) + 0.001;
+
+    annotation(fig_handle, 'textbox', [label_x label_y 0.1 0.05], ...
+        'String', label, 'Units', 'normalized', ...
+        'FontSize', subLabelFS, 'FontWeight', 'bold', ...
+        'LineStyle','none', 'HorizontalAlignment','left', 'VerticalAlignment','bottom');
+end
