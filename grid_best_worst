@@ -177,9 +177,11 @@ for mode_target = stage_list'
             'dplat',Zv(worst_idx(ii)),'kind',"worst",'tcharge',NaN);
     end
 
-    %% --- Heatmap + markers ---
+%% --- Heatmap + markers ---
     figure(fig_id); clf; set(gcf,'Color','w'); fig_id = fig_id + 1;
 
+    % (이전 답변에서 추천드린 surf 방식이 데이터 확인에 더 좋지만, 
+    %  일단 보내주신 contourf 코드 기준으로 작성합니다)
     contourf(DUTY, TPER, Z, 40, 'LineColor','none');
     colorbar; hold on;
 
@@ -193,16 +195,22 @@ for mode_target = stage_list'
     set(gca,'YScale','log','FontSize',14);
     axis square;
 
-    % 제목에 C-rate 같이 표시
-    % if Crate_exists
-    %     title(sprintf('stage %d | Irest %.3g | C-rate %.3g', mode_target, Ival, cval));
-    % else
-    %     title(sprintf('stage %d | Irest %.3g | block %d', mode_target, Ival, cval));
+    % [수정 1] C-rate를 제목으로 예쁘게 표시
+    % C-rate가 있으면 "C-rate: X.XX C" 형식으로, 없으면 "Block: X" 형식으로 표시
+    if Crate_exists
+        title_str = sprintf('C-rate: %.2f C', cval); 
+    else
+        title_str = sprintf('Block ID: %d', cval);
+    end
+    
+    % title 함수에 FontSize와 FontWeight 옵션을 주어 강조
+    title(title_str, 'FontSize', 18, 'FontWeight', 'bold');
+
+    % [수정 2] (b) 라벨 표시 부분 제거 (주석 처리)
+    % if isKey(stageLabelMap, mode_target)
+    %     put_label_outside(gcf, gca, stageLabelMap(mode_target), subLabelFS);
     % end
 
-    if isKey(stageLabelMap, mode_target)
-        put_label_outside(gcf, gca, stageLabelMap(mode_target), subLabelFS);
-    end
     hold off;
 
 end
