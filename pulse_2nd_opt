@@ -6,9 +6,9 @@ import com.comsol.model.*
 import com.comsol.model.util.*
 
 %% 0) Output folder --------------------------------------------------------
-fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
+fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Pulse_Grid\second_opt';
 ts = datestr(now,'yyyymmdd_HHMMSS');
-out_dir = fullfile(fig_base_dir, ['pulse_grid_CCCV_stage2_' ts]);
+out_dir = fullfile(fig_base_dir, ['second_opt_pulse_CCCV' ts]);
 if ~isfolder(out_dir), mkdir(out_dir); end
 
 %% 1) Load model -----------------------------------------------------------
