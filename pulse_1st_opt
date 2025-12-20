@@ -33,7 +33,7 @@ import com.comsol.model.*
 import com.comsol.model.util.*
 
 %% 0) Output folder --------------------------------------------------------
-fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Pulse_Grid';
+fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Pulse_Grid\first_opt';
 assert(isfolder(fileparts(fig_base_dir)) || isfolder(fig_base_dir), ...
     'Figure 상위 폴더가 유효하지 않습니다.');
 ts = datestr(now,'yyyymmdd_HHMMSS');
