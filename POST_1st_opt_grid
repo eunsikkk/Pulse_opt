@@ -1,102 +1,138 @@
 %% =========================================================================
-%  Triangle map: x = SOC pstart (nominal), y = SOC pend
+%  Duration map: pstart (x) vs duration (y = pend - pstart_nom)
+%  - input: CSV from CCCV pulse SOC-window grid
+%  - output: figure + png
 %% =========================================================================
 clc; clear; close all;
-
 %% 0) CSV 선택
 base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
 assert(isfolder(base_dir), '폴더가 존재하지 않습니다: %s', base_dir);
-
 [fn, fp] = uigetfile(fullfile(base_dir, '*.csv'), 'Pulse Grid CSV 파일을 선택하세요');
 if isequal(fn,0), error('파일 선택이 취소되었습니다.'); end
 fullpath_csv = fullfile(fp, fn);
 fprintf('선택한 CSV: %s\n', fullpath_csv);
-
 %% 1) CSV 로드
 T = readtable(fullpath_csv);
-
 %% 2) 어떤 값을 색으로 칠할지 선택
 metric_name = 'd_plating';   % 'T', 'T_avg', 'T_max', 's', 'plating_cap' 등으로 바꿔도 됨
 assert(any(strcmp(T.Properties.VariableNames, metric_name)), ...
     'CSV에 %s 컬럼이 없습니다.', metric_name);
-
-%% 3) baseline/더미 행 제거 (pend==0 이거나 NaN 등)
+%% 3) baseline/더미 행 제거 + duration 계산
+%   baseline row는 보통 pstart_nom=0, pend=0 형태라서 제거
 valid = ~isnan(T.pstart_nom) & ~isnan(T.pend) & (T.pend > 0);
 T = T(valid, :);
-
-%% 4) grid 축 정의
-x_list = 0.0:0.1:0.9;  % pstart_nom
-y_list = 0.1:0.1:1.0;  % pend
-
+T.duration = T.pend - T.pstart_nom;
+T = T(T.duration > 0, :);   % duration <=0 제거
+%% 4) grid 축 정의 (y축을 pend로 변경)
+% pstart는 0.0:0.1:0.9 그대로
+x_list = 0.0:0.1:0.9; 
+% pend는 0.1부터 1.0까지
+y_list = 0.1:0.1:1.0; 
 nx = numel(x_list);
 ny = numel(y_list);
-
-Z = nan(ny, nx);  % rows=y(pend), cols=x(pstart)
-
-%% 5) 데이터 채우기 (좌표 매핑)
+Z = nan(ny, nx);   % rows=pend, cols=pstart
+%% 5) 데이터 채우기 (pend 좌표 매핑)
 x = T.pstart_nom;
-y = T.pend;
+y_end = T.pend; % duration 대신 pend 사용
 v = T.(metric_name);
-
 for k = 1:height(T)
     ix = find(abs(x_list - x(k)) < 1e-12, 1);
-    iy = find(abs(y_list - y(k)) < 1e-12, 1);
+    iy = find(abs(y_list - y_end(k)) < 1e-12, 1);
     if ~isempty(ix) && ~isempty(iy)
-        Z(iy, ix) = v(k);   % 같은 좌표가 있으면 마지막 값으로 덮어씀
+        Z(iy, ix) = v(k);
     end
 end
-
-%% 6) 삼각형 마스크 적용: pend <= pstart 영역은 NaN
-[Xg, Yg] = meshgrid(x_list, y_list);
-Z(Yg <= Xg) = nan;
-
-%% 7) Plot (imagesc + NaN 투명 처리)
-figure('Color','w','Position',[100 100 900 700]);
-
-h = imagesc(x_list, y_list, Z);
-set(gca,'YDir','normal');  % y 아래->위 증가
-
-% NaN 영역 투명
-set(h, 'AlphaData', ~isnan(Z));
-
-axis tight;
+%% 6) Plot (개선된 시각화: pend 기준)
+figure('Color','w','Position',[100 100 900 750]);
+% 1. 데이터가 있는 부분만 등고선으로 그림 (Soft한 시각화)
+[X, Y] = meshgrid(x_list, y_list);
+contourf(X, Y, Z, 20, 'LineStyle', 'none'); 
+hold on;
+% 2. 배경에 격자점(Data points) 표시
+plot(x, y_end, 'k.', 'MarkerSize', 4, 'Color', [0.3 0.3 0.3]);
+% 3. 대각선 가이드라인 (pstart = pend 지점)
+% 이 선보다 아래는 물리적으로 불가능한 영역 (시작이 끝보다 클 수 없음)
+line([0 1], [0 1], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+text(0.6, 0.5, 'Invalid Region', 'Color', 'r', 'FontSize', 10, 'FontWeight', 'bold', 'Rotation', 40);
+set(gca,'YDir','normal'); 
 axis square;
-
-xlabel('SOC pstart (nominal)');
-ylabel('SOC pend');
-title(sprintf('Triangle map: %s', metric_name), 'Interpreter','none');
-
+grid on;
+box on;
+xlabel('Pulse Start SOC (pstart)');
+ylabel('Pulse End SOC (pend)');
+title(sprintf('Pulse Window Map (y=pend): %s', metric_name), 'Interpreter','none', 'FontSize', 14);
 xticks(x_list);
 yticks(y_list);
-xlim([min(x_list) max(x_list)]);
-ylim([min(y_list) max(y_list)]);
-
-grid on; box on;
-
+xlim([0 0.9]);
+ylim([0.1 1.0]);
 cb = colorbar;
 cb.Label.String = metric_name;
 cb.Label.Interpreter = 'none';
+colormap(jet); % Plating 농도를 보기에 적합한 컬러맵
+%% 6) Plot (1): Contour Map (기호 옆에 큰 글씨)
+fig1 = figure('Color','w','Name','Contour Map','Position',[100 100 800 650]);
+[X, Y] = meshgrid(x_list, y_list);
+contourf(X, Y, Z, 20, 'LineStyle', 'none'); hold on;
 
-%% 8) best/worst 마커(선택)
-if strcmp(metric_name,'d_plating')
+plot(x, y_end, 'k.', 'MarkerSize', 4, 'Color', [0.3 0.3 0.3]);
+line([0 1], [0 1], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+
+if any(~isnan(Z(:)))
     [minVal, minIdx] = min(Z(:), [], 'omitnan');
     [maxVal, maxIdx] = max(Z(:), [], 'omitnan');
-
     [iy_min, ix_min] = ind2sub(size(Z), minIdx);
     [iy_max, ix_max] = ind2sub(size(Z), maxIdx);
+    
+    % Best: 기호 옆에 흰색 글씨 (박스 없이)
+    plot(x_list(ix_min), y_list(iy_min), 'wo', 'MarkerSize', 12, 'LineWidth', 2.5);
+    text(x_list(ix_min)+0.02, y_list(iy_min), sprintf(' Best: %.3g', minVal), ...
+        'FontSize', 13, 'FontWeight', 'bold', 'Color', 'w');
 
-    hold on;
-    plot(x_list(ix_min), y_list(iy_min), 'ko', 'MarkerSize', 10, 'LineWidth', 2);
-    plot(x_list(ix_max), y_list(iy_max), 'kx', 'MarkerSize', 12, 'LineWidth', 2);
-
-    text(x_list(ix_min), y_list(iy_min), sprintf('  min=%.3g', minVal), ...
-        'Color','k','FontSize',12,'FontWeight','bold');
-    text(x_list(ix_max), y_list(iy_max), sprintf('  max=%.3g', maxVal), ...
-        'Color','k','FontSize',12,'FontWeight','bold');
+    % Worst: 기호 옆에 검정 글씨
+    plot(x_list(ix_max), y_list(iy_max), 'kx', 'MarkerSize', 12, 'LineWidth', 2.5);
+    text(x_list(ix_max)+0.02, y_list(iy_max), sprintf(' Worst: %.3g', maxVal), ...
+        'FontSize', 13, 'FontWeight', 'bold', 'Color', 'k');
 end
 
-%% 9) 저장
+set(gca,'YDir','normal'); axis square; grid on; box on;
+xlabel('Pulse Start SOC (pstart)'); ylabel('Pulse End SOC (pend)');
+title(sprintf('[Contour] %s', metric_name), 'Interpreter','none');
+cb1 = colorbar; colormap(jet);
+
+%% 7) Plot (2): Imagesc Map (기호 옆에 큰 글씨 + 가독성 강화)
+fig2 = figure('Color','w','Name','Grid Map','Position',[150 150 800 650]);
+h = imagesc(x_list, y_list, Z);
+set(gca,'YDir','normal'); hold on;
+
+alpha = ~isnan(Z);
+set(h, 'AlphaData', alpha);
+line([0 1], [0 1], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+
+if any(~isnan(Z(:)))
+    % Best: 굵은 흰색 원 마커
+    plot(x_list(ix_min), y_list(iy_min), 'wo', 'MarkerSize', 14, 'LineWidth', 3);
+    % 텍스트: 화살표 제거, 폰트 크기 13으로 확대
+    % 'interpreter','none'으로 특수문자 오류 방지, 약간 우측 배치
+    text(x_list(ix_min)+0.03, y_list(iy_min), sprintf('Best: %.3g', minVal), ...
+        'FontSize', 13, 'FontWeight', 'bold', 'Color', 'w', ...
+        'HorizontalAlignment', 'left');
+    
+    % Worst: 굵은 검정 X 마커
+    plot(x_list(ix_max), y_list(iy_max), 'kx', 'MarkerSize', 14, 'LineWidth', 3);
+    text(x_list(ix_max)+0.03, y_list(iy_max), sprintf('Worst: %.3g', maxVal), ...
+        'FontSize', 13, 'FontWeight', 'bold', 'Color', 'k', ...
+        'HorizontalAlignment', 'left');
+end
+
+axis square; grid on; box on;
+xlabel('Pulse Start SOC (pstart)'); ylabel('Pulse End SOC (pend)');
+title(sprintf('[Imagesc] %s', metric_name), 'Interpreter','none');
+xticks(x_list); yticks(y_list);
+cb2 = colorbar; colormap(jet);
+%% 8) 저장 (두 개의 파일로 각각 저장)
 [out_dir, base_name, ~] = fileparts(fullpath_csv);
-png_path = fullfile(out_dir, sprintf('%s_pstart_pend_%s.png', base_name, metric_name));
-saveas(gcf, png_path);
-fprintf('Saved: %s\n', png_path);
+% Contour 저장
+saveas(fig1, fullfile(out_dir, sprintf('%s_Contour_%s.png', base_name, metric_name)));
+% Imagesc 저장
+saveas(fig2, fullfile(out_dir, sprintf('%s_Grid_%s.png', base_name, metric_name)));
+fprintf('저장 완료:\n 1) %s_Contour_%s.png\n 2) %s_Grid_%s.png\n', base_name, metric_name, base_name, metric_name);
