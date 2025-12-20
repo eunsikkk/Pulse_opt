@@ -1,0 +1,191 @@
+% =========================================================================
+% COMSOL-MATLAB: CCCV Baseline + Pulse Grid (Full Vector Output)
+% =========================================================================
+clc; clear; close all;
+import com.comsol.model.*
+import com.comsol.model.util.*
+
+%% 0) Output folder --------------------------------------------------------
+fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
+ts = datestr(now,'yyyymmdd_HHMMSS');
+out_dir = fullfile(fig_base_dir, ['pulse_grid_CCCV_stage2_' ts]);
+if ~isfolder(out_dir), mkdir(out_dir); end
+
+%% 1) Load model -----------------------------------------------------------
+filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
+filename = 'ES_MSCCPC_Final_1214.mph';
+full_path = fullfile(filepath, filename);
+assert(isfile(full_path),'mph 파일 없음: %s', full_path);
+model = mphload(full_path);
+ModelUtil.showProgress(true);
+disp('모델 불러오기 완료.');
+
+%% 2) Study/Dataset IDs ----------------------------------------------------
+baseline_study_id = 'std1';
+baseline_dset_id  = 'dset1';
+pulse_study_id    = 'std3';
+pulse_dset_id     = 'dset37';
+
+%% 3) Fixed SOC window -----------------------------------------------------
+S2_start = 0.05;    
+S2_dur   = 0.7;    
+
+%% 4) Grid lists -----------------------------------------------------------
+Crate_list = linspace(3.583,4.5,10);     
+Tper_list  = logspace(0,2,10);      
+duty_list  = linspace(0.2,0.9,10);     
+Irest_fixed = 0.0;
+N_total = numel(Crate_list) * numel(Tper_list) * numel(duty_list);
+
+%% 5) Result Storage Initialization ----------------------------------------
+fn_grid = fullfile(out_dir, ['cccv_pulse_grid_stage2_' ts '.csv']);
+header_cols = {'C_rate','pstart','pend','pulse_period_s','duty','I_rest', ...
+               't','phi_n','V','I','T_avg','T_max','plating_cap', ...
+               'plating_cap_base','d_plating'};
+init_csv(fn_grid, header_cols);
+
+Results = struct([]); 
+kCase = 0;
+
+%% 6) Main Loop ------------------------------------------------------------
+tic;
+for ic = 1:numel(Crate_list)
+    Crate = Crate_list(ic);
+    model.param.set('C_rate', num2str(Crate));
+    fprintf('\n===== [C-rate %2d/%2d] C_rate = %.4fC =====\n', ic, numel(Crate_list), Crate);
+
+    % --- Baseline CCCV ---
+    model.param.set('pulse_stage_mode', '0');
+    if ~try_run_study(model, baseline_study_id), continue; end
+    
+    % Baseline의 시계열 데이터(벡터) 전체 추출
+    try
+        expr_b = {'t','liion.Ect','plating_cap'};
+        Db = mpheval(model, expr_b, 'dataset', baseline_dset_id, 'edim', 'point', 'selection', 2, 'solnum', 'all');
+        baseline_vecs.t = Db.d1(:);
+        baseline_vecs.phi_n = Db.d2(:);
+        baseline_vecs.plating_cap = Db.d3(:);
+        plating_cap_base_scalar = baseline_vecs.plating_cap(end);
+    catch
+        warning('Baseline 벡터 추출 실패 (C_rate=%.2f)', Crate);
+        continue;
+    end
+
+    % --- Pulse Grid Loop ---
+    for ip = 1:numel(Tper_list)
+        for id = 1:numel(duty_list)
+            kCase = kCase + 1;
+            Tper = Tper_list(ip);
+            duty = duty_list(id);
+            
+            fprintf('[%4d/%4d] C=%.3f, Tper=%.3f s, duty=%.3f\n', kCase, N_total, Crate, Tper, duty);
+            
+            % 시뮬레이션 및 데이터 수집
+            res = run_pulse_sim(model, pulse_study_id, pulse_dset_id, Crate, S2_start, S2_dur, Irest_fixed, duty, Tper, baseline_vecs);
+            
+            % 1. CSV 기록 (스칼라 요약)
+            append_grid_row(fn_grid, [Crate, res.pstart, res.pend, Tper, duty, Irest_fixed, ...
+                                      res.t_end, res.phi_n_min, res.V_max, res.I_max, ...
+                                      res.T_avg_peak, res.T_max_peak, res.plating_cap_end, ...
+                                      plating_cap_base_scalar, res.d_plating_final]);
+            
+            % 2. 메모리에 전체 데이터(벡터 포함) 저장
+            Results(kCase).data = res;
+        end
+    end
+end
+toc;
+
+%% 7) Final MAT Save -------------------------------------------------------
+mat_path_final = fullfile(out_dir, ['results_' ts '.mat']);
+save(mat_path_final, 'Results', '-v7.3'); 
+fprintf('\n모든 작업 완료. 폴더 확인: %s\n', out_dir);
+
+%% ======================= Helper Functions ==========================
+
+function res = run_pulse_sim(model, study_id, dset_id, Crate, S2_start, S2_dur, Irest, duty, Tper, baseline_vecs)
+    [ps, pe] = soc_window_for_csv(S2_start, S2_dur);
+    res = struct('pstart', ps, 'pend', pe, 't_end', NaN, 'phi_n_min', NaN, 'V_max', NaN, 'I_max', NaN, ...
+                 'T_avg_peak', NaN, 'T_max_peak', NaN, 'plating_cap_end', NaN, 'd_plating_final', NaN, ...
+                 't', [], 'phi_n', [], 'V', [], 'I', [], 'T_avg', [], 'T_max', [], ...
+                 'plating_cap', [], 'plating_cap_base_interp', [], 'd_plating', []);
+
+    try
+        % Parameter Set
+        model.param.set('C_rate', num2str(Crate));
+        model.param.set('pulse_stage_mode', '1');
+        model.param.set('pulse_rest_current_param_coeffi', num2str(Irest));
+        model.param.set('pulse_freq', [num2str(Tper) '[s]']);
+        model.param.set('duty_cycle', num2str(duty));
+        model.param.set('S2_start', num2str(S2_start));
+        model.param.set('S2_dur',   num2str(S2_dur));
+        
+        % Run
+        model.study(study_id).run();
+        
+        % 1. 물리량 벡터 추출
+        expr = {'t','liion.Ect','liion.cdc1.CC_CH','liion.cdc1.CV_CH','E_cell','liion.cdc1.Icell','plating_cap'};
+        D = mpheval(model, expr, 'dataset', dset_id, 'edim', 'point', 'selection', 2, 'solnum', 'all');
+        
+        res.t = D.d1(:); 
+        res.phi_n = D.d2(:); 
+        res.V = D.d5(:); 
+        res.I = D.d6(:);
+        res.plating_cap = D.d7(:);
+        
+        % 2. plating_cap_base 및 d_plating 벡터 계산
+        % Pulse의 시간 축(res.t)에 맞춰서 Baseline의 plating 값을 인터폴레이션(보간)
+        % (Pulse 적용 시 충전 시간이 변하므로 동일 시간대 비교를 위함)
+        res.plating_cap_base_interp = interp1(baseline_vecs.t, baseline_vecs.plating_cap, res.t, 'linear', 'extrap');
+        
+        % d_plating(t) = Pulse(t) - Baseline(t)
+        res.d_plating = res.plating_cap - res.plating_cap_base_interp;
+        
+        % 스칼라 요약값
+        res.plating_cap_end = res.plating_cap(end);
+        res.d_plating_final = res.plating_cap_end - baseline_vecs.plating_cap(end);
+        
+        % 3. 온도 벡터
+        G_avg = mpheval(model,'T_avg','dataset',dset_id,'edim','domain','solnum','all');
+        G_max = mpheval(model,'T_max','dataset',dset_id,'edim','domain','solnum','all');
+        res.T_avg = G_avg.d1(:); 
+        res.T_max = G_max.d1(:);
+        res.T_avg_peak = max(res.T_avg, [], 'omitnan');
+        res.T_max_peak = max(res.T_max, [], 'omitnan');
+        
+        % CC/CV 구간 기반 통계
+        idx = (D.d3==1) | (D.d4==1);
+        if any(idx)
+            res.t_end = res.t(find(idx,1,'last'));
+            res.phi_n_min = min(res.phi_n(idx));
+            res.V_max = max(res.V(idx));
+            res.I_max = max(res.I(idx));
+        end
+        
+    catch ME
+        warning('Simulation failed: %s', ME.message);
+    end
+end
+
+function init_csv(fn, names)
+    if ~isfile(fn)
+        T = cell2table(cell(0,numel(names)), 'VariableNames', names);
+        writetable(T, fn);
+    end
+end
+
+function append_grid_row(fn, row)
+    T = array2table(row, 'VariableNames', {'C_rate','pstart','pend','pulse_period_s','duty','I_rest', ...
+                                           't','phi_n','V','I','T_avg','T_max','plating_cap', ...
+                                           'plating_cap_base','d_plating'});
+    writetable(T, fn, 'WriteMode','Append');
+end
+
+function [pstart_csv, pend_csv] = soc_window_for_csv(S2_start, S2_dur)
+    if abs(S2_start - 0.05) < 1e-12, pstart_csv = 0.0; else, pstart_csv = S2_start; end
+    pend_csv = pstart_csv + S2_dur;
+end
+
+function ok = try_run_study(model, study_id)
+    try, model.study(study_id).run(); ok = true; catch, ok = false; end
+end
