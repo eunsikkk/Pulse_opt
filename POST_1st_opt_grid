@@ -5,7 +5,7 @@
 %% =========================================================================
 clc; clear; close all;
 %% 0) CSV 선택
-base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\MSCC_optimization\Pulse_opt';
+base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Pulse_Grid\first_opt';
 assert(isfolder(base_dir), '폴더가 존재하지 않습니다: %s', base_dir);
 [fn, fp] = uigetfile(fullfile(base_dir, '*.csv'), 'Pulse Grid CSV 파일을 선택하세요');
 if isequal(fn,0), error('파일 선택이 취소되었습니다.'); end
@@ -129,10 +129,31 @@ xlabel('Pulse Start SOC (pstart)'); ylabel('Pulse End SOC (pend)');
 title(sprintf('[Imagesc] %s', metric_name), 'Interpreter','none');
 xticks(x_list); yticks(y_list);
 cb2 = colorbar; colormap(jet);
-%% 8) 저장 (두 개의 파일로 각각 저장)
-[out_dir, base_name, ~] = fileparts(fullpath_csv);
-% Contour 저장
-saveas(fig1, fullfile(out_dir, sprintf('%s_Contour_%s.png', base_name, metric_name)));
-% Imagesc 저장
-saveas(fig2, fullfile(out_dir, sprintf('%s_Grid_%s.png', base_name, metric_name)));
-fprintf('저장 완료:\n 1) %s_Contour_%s.png\n 2) %s_Grid_%s.png\n', base_name, metric_name, base_name, metric_name);
+%% 8) 저장 (CSV 이름별로 개별 폴더 생성) --------------------------------------
+% 1. 최상위 저장 폴더 설정
+parent_out_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Pulse_Grid\first_opt_figure';
+
+% 2. CSV 파일명(확장자 제외)과 현재 시간 추출
+[~, base_name, ~] = fileparts(fullpath_csv);
+ts_now = datestr(now, 'yyyymmdd_HHMMSS');
+
+% 3. 이 실험만을 위한 전용 하위 폴더 경로 생성 (예: CSV파일명_20251221_123000)
+%    폴더명에 시간을 포함하고 싶지 않다면 ts_now 부분을 지우셔도 됩니다.
+save_folder_name = sprintf('%s_%s', base_name, ts_now);
+final_out_dir = fullfile(parent_out_dir, save_folder_name);
+
+% 4. 전용 폴더 생성
+if ~isfolder(final_out_dir)
+    mkdir(final_out_dir);
+    fprintf('새로운 결과 폴더를 생성했습니다: %s\n', final_out_dir);
+end
+
+% 5. 파일 저장 (각각의 그림 저장)
+saveas(fig1, fullfile(final_out_dir, sprintf('%s_Contour_%s.png', base_name, metric_name)));
+saveas(fig2, fullfile(final_out_dir, sprintf('%s_Grid_%s.png', base_name, metric_name)));
+
+fprintf('--------------------------------------------------\n');
+fprintf('분석 및 저장 완료!\n');
+fprintf('저장 경로: %s\n', final_out_dir);
+fprintf('저장 파일: 1) Contour, 2) Grid\n');
+fprintf('--------------------------------------------------\n');
