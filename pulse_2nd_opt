@@ -38,7 +38,7 @@ Irest_fixed = 0.0;
 N_total = numel(Crate_list) * numel(Tper_list) * numel(duty_list);
 
 %% 5) Result Storage Initialization ----------------------------------------
-fn_grid = fullfile(out_dir, ['cccv_pulse_grid_stage2_' ts '.csv']);
+fn_grid = fullfile(out_dir, ['cccv_pulse_grid_' ts '.csv']);
 header_cols = {'C_rate','pstart','pend','pulse_period_s','duty','I_rest', ...
                't','phi_n','V','I','T_avg','T_max','plating_cap', ...
                'plating_cap_base','d_plating'};
