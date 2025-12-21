@@ -1,0 +1,295 @@
+%% =========================================================================
+% Single C-rate -> pick best1/worst1 on (pstart_act x pend) grid -> COMSOL -> 5 figs
+%  - CSV columns: C_rate, pstart_act, pend, S2_start, S2_dur, d_plating, etc.
+%  - Baseline: std1 / dset1 (Pulse OFF)
+%  - Pulse:    std3 / dset37 (Pulse ON)
+%% =========================================================================
+clc; clear; close all;
+
+%% 0) CSV 선택
+base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Pulse_Grid\first_opt';
+if ~isfolder(base_dir), base_dir = pwd; end 
+[fn, fp] = uigetfile(fullfile(base_dir, '*.csv'), 'Pulse Grid CSV 파일을 선택하세요');
+if isequal(fn, 0), error('파일 선택이 취소되었습니다.'); end
+fullpath_csv = fullfile(fp, fn);
+fprintf('선택한 CSV: %s\n', fullpath_csv);
+
+%% 1) CSV 로드 및 데이터 준비
+T = readtable(fullpath_csv);
+
+% 컬럼 매핑
+Crate_all  = T.C_rate;
+pstart_all = T.pstart_act; % pstart_nom 대신 pstart_act 사용
+pend_all   = T.pend;
+Irest_all  = T.I_rest;
+dplat_all  = T.d_plating;
+
+%% 2) 사용자 입력: C-rate 필터링
+crate_target = input('\n원하는 C_rate 값을 입력하세요 (예: 3.583): ');
+crate_tol = 1e-9;
+idxC = abs(Crate_all - crate_target) < crate_tol;
+
+if ~any(idxC)
+    [~, kmin] = min(abs(Crate_all - crate_target));
+    crate_snap = Crate_all(kmin);
+    warning('C_rate=%.12g 데이터가 없어 가장 가까운 %.12g 로 스냅합니다.', crate_target, crate_snap);
+    crate_target = crate_snap;
+    idxC = abs(Crate_all - crate_target) < crate_tol;
+end
+
+%% 3) I_rest 필터 및 유효 데이터 추출
+Irest_candidates = unique(Irest_all(idxC));
+if numel(Irest_candidates) > 1
+    fprintf('가능한 I_rest: '); disp(Irest_candidates');
+    Irest_target = input('사용할 I_rest 입력: ');
+else
+    Irest_target = Irest_candidates(1);
+end
+
+% 유효 구간 필터링 (시작이 끝보다 작고, C_rate와 I_rest가 일치하는 데이터)
+idx = idxC & (abs(Irest_all - Irest_target) < 1e-12) & (pend_all > pstart_all);
+T_sub = T(idx, :);
+fprintf('\n[SUBSET] C_rate=%.12g, I_rest=%.6g, N=%d\n', crate_target, Irest_target, height(T_sub));
+
+%% 4) Best/Worst 포인트 및 COMSOL 파라미터 추출
+[best_dplat, ib] = min(T_sub.d_plating);
+[worst_dplat, iw] = max(T_sub.d_plating);
+
+% Best Case
+best_pstart_act = T_sub.pstart_act(ib);
+best_pend       = T_sub.pend(ib);
+best_S2_start   = T_sub.S2_start(ib); % COMSOL에 들어갈 시작점
+best_S2_dur     = T_sub.S2_dur(ib);   % COMSOL에 들어갈 펄스 구간 길이
+best_duty       = T_sub.duty(ib);
+best_Tper       = T_sub.pulse_period_s(ib);
+
+% Worst Case
+worst_pstart_act = T_sub.pstart_act(iw);
+worst_pend       = T_sub.pend(iw);
+worst_S2_start   = T_sub.S2_start(iw); % COMSOL에 들어갈 시작점
+worst_S2_dur     = T_sub.S2_dur(iw);   % COMSOL에 들어갈 펄스 구간 길이
+worst_duty       = T_sub.duty(iw);
+worst_Tper       = T_sub.pulse_period_s(iw);
+
+fprintf('\n=== Best Case (Min d_plating) ===\n');
+fprintf('  Actual Start: %.4f, End: %.4f\n', best_pstart_act, best_pend);
+fprintf('  COMSOL Params -> S2_start: %.4f, S2_dur: %.4f\n', best_S2_start, best_S2_dur);
+
+fprintf('\n=== Worst Case (Max d_plating) ===\n');
+fprintf('  Actual Start: %.4f, End: %.4f\n', worst_pstart_act, worst_pend);
+fprintf('  COMSOL Params -> S2_start: %.4f, S2_dur: %.4f\n', worst_S2_start, worst_S2_dur);
+
+%% 5) COMSOL 실행부
+import com.comsol.model.*
+import com.comsol.model.util.*
+ModelUtil.showProgress(true);
+
+filepath = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL';
+filename = 'ES_MSCCPC_Final_1214.mph';
+full_path = fullfile(filepath, filename);
+if ~isfile(full_path), error('mph 파일이 없습니다: %s', full_path); end
+
+model = mphload(full_path);
+
+t_cycling_default = 10000;
+dt_out_default = 1;
+
+% 5-1) Baseline (std1)
+fprintf('\n[SIM] Baseline running... (std1)\n');
+R0 = run_pulse_case_window(model, best_duty, best_Tper, Irest_target, ...
+                           best_S2_start, best_S2_dur, t_cycling_default, dt_out_default, ...
+                           'std1', 'dset1');
+
+% 5-2) Best Case (std3)
+fprintf('[SIM] Best Case running... (std3)\n');
+Rb = run_pulse_case_window(model, best_duty, best_Tper, Irest_target, ...
+                           best_S2_start, best_S2_dur, t_cycling_default, dt_out_default, ...
+                           'std3', 'dset37');
+
+% 5-3) Worst Case (std3)
+fprintf('[SIM] Worst Case running... (std3)\n');
+Rw = run_pulse_case_window(model, worst_duty, worst_Tper, Irest_target, ...
+                           worst_S2_start, worst_S2_dur, t_cycling_default, dt_out_default, ...
+                           'std3', 'dset37');
+
+%% =========================================================================
+% 6) Figure 저장 및 개별 그래프 생성 (요청 스타일 반영)
+%% =========================================================================
+fig_base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Pulse_Grid\first_opt_post_figure';
+ts = datestr(now,'yyyymmdd_HHMMSS');
+fig_out_dir = fullfile(fig_base_dir, sprintf('pulse_Crate_%g_split_%s', crate_target, ts));
+if ~isfolder(fig_out_dir), mkdir(fig_out_dir); end
+
+% 컬러 팔레트 정의
+colV    = [239, 192, 0]/255;   % Yellow
+colI    = [77, 187, 213]/255;  % Cyan
+colTmax = [205, 83, 76]/255;   % Red
+colAn   = [146, 94, 159]/255;  % Purple
+colPc   = [32, 133, 78]/255;   % Green
+colGrey = [116, 118, 120]/255; % Grey
+
+%% --- FIG1: V/I 분리 (축 검정색, Worst 색상 변경) ---
+% (1-Best)
+f1b = figure('Name','VI_Best'); set(gcf,'Color','w'); hold on;
+yyaxis left; 
+plot(R0.t, R0.E, '--', 'Color', colGrey, 'LineWidth', 2); 
+plot(Rb.t, Rb.E, '-', 'Color', colV, 'LineWidth', 2); 
+ylabel('E_{cell} (V)'); ax = gca; ax.YAxis(1).Color = 'k'; % 좌측 축 검정색
+
+yyaxis right; 
+plot(R0.t, R0.I, '--', 'Color', [0.3 0.3 0.3], 'LineWidth', 2); 
+plot(Rb.t, Rb.I, '-', 'Color', colI, 'LineWidth', 2); 
+ylabel('I_{cell} (A)'); ax.YAxis(2).Color = 'k'; % 우측 축 검정색
+
+xlabel('t (s)'); legend({'Base V','Best V','Base I','Best I'}); apply_fig_style();
+export_png(f1b, fullfile(fig_out_dir, 'Fig1_VI_Best.png'));
+
+% (1-Worst)
+f1w = figure('Name','VI_Worst'); set(gcf,'Color','w'); hold on;
+yyaxis left; 
+plot(R0.t, R0.E, '--', 'Color', colGrey, 'LineWidth', 2); 
+plot(Rw.t, Rw.E, '-', 'Color', colV, 'LineWidth', 2); % Worst도 Yellow 사용
+ylabel('E_{cell} (V)'); ax = gca; ax.YAxis(1).Color = 'k';
+
+yyaxis right; 
+plot(R0.t, R0.I, '--', 'Color', [0.3 0.3 0.3], 'LineWidth', 2); 
+plot(Rw.t, Rw.I, '-', 'Color', colI, 'LineWidth', 2); % Worst도 Cyan 사용
+ylabel('I_{cell} (A)'); ax.YAxis(2).Color = 'k';
+
+xlabel('t (s)'); legend({'Base V','Worst V','Base I','Worst I'}); apply_fig_style();
+export_png(f1w, fullfile(fig_out_dir, 'Fig1_VI_Worst.png'));
+
+
+%% --- FIG2: Temperature 분리 (Worst도 Red 사용) ---
+% (2-Best)
+f2b = figure; set(gcf,'Color','w'); hold on;
+plot(R0.t, R0.Tavg-273.15, '--', 'Color', colGrey, 'LineWidth', 2); 
+plot(Rb.t, Rb.Tavg-273.15, '-', 'Color', colTmax, 'LineWidth', 2);
+ylabel('Temp (°C)'); legend({'Base Tavg','Best Tavg'}); apply_fig_style();
+export_png(f2b, fullfile(fig_out_dir, 'Fig2_T_Best.png'));
+
+% (2-Worst)
+f2w = figure; set(gcf,'Color','w'); hold on;
+plot(R0.t, R0.Tavg-273.15, '--', 'Color', colGrey, 'LineWidth', 2); 
+plot(Rw.t, Rw.Tavg-273.15, '-', 'Color', colTmax, 'LineWidth', 2); % Worst도 Red 사용
+ylabel('Temp (°C)'); legend({'Base Tavg','Worst Tavg'}); apply_fig_style();
+export_png(f2w, fullfile(fig_out_dir, 'Fig2_T_Worst.png'));
+
+
+%% --- FIG3: Anode Potential 분리 (Worst에 Purple 사용) ---
+% (3-Best)
+f3b = figure; set(gcf,'Color','w'); hold on;
+plot(R0.t, R0.vdiff, '--', 'Color', colGrey, 'LineWidth', 2); 
+plot(Rb.t, Rb.vdiff, '-', 'Color', colAn, 'LineWidth', 2);
+ylabel('Anode Pot. (V)'); legend({'Base','Best'}); apply_fig_style();
+export_png(f3b, fullfile(fig_out_dir, 'Fig3_Anode_Best.png'));
+
+% (3-Worst)
+f3w = figure; set(gcf,'Color','w'); hold on;
+plot(R0.t, R0.vdiff, '--', 'Color', colGrey, 'LineWidth', 2); 
+plot(Rw.t, Rw.vdiff, '-', 'Color', colAn, 'LineWidth', 2); % Worst에 Purple 사용
+ylabel('Anode Pot. (V)'); legend({'Base','Worst'}); apply_fig_style();
+export_png(f3w, fullfile(fig_out_dir, 'Fig3_Anode_Worst.png'));
+
+
+%% --- FIG4: Plating Capacity 분리 (Worst도 Green 사용) ---
+% (4-Best)
+f4b = figure; set(gcf,'Color','w'); hold on;
+plot(R0.t, R0.pc, '--', 'Color', colGrey, 'LineWidth', 2); 
+plot(Rb.t, Rb.pc, '-', 'Color', colPc, 'LineWidth', 2);
+ylabel('Plating Cap.'); legend({'Base','Best'}); apply_fig_style();
+export_png(f4b, fullfile(fig_out_dir, 'Fig4_Plating_Best.png'));
+
+% (4-Worst)
+f4w = figure; set(gcf,'Color','w'); hold on;
+plot(R0.t, R0.pc, '--', 'Color', colGrey, 'LineWidth', 2); 
+plot(Rw.t, Rw.pc, '-', 'Color', colPc, 'LineWidth', 2); % Worst도 Green 사용
+ylabel('Plating Cap.'); legend({'Base','Worst'}); apply_fig_style();
+export_png(f4w, fullfile(fig_out_dir, 'Fig4_Plating_Worst.png'));
+
+
+%% --- FIG5: Charge Time (Best/Worst 구분 색상 반영) ---
+f5 = figure; set(gcf,'Color','w'); hold on;
+vals = [R0.t(end); Rb.t(end); Rw.t(end)];
+b = bar(vals); b.FaceColor = 'flat';
+b.CData(1,:) = colGrey; % Baseline
+b.CData(2,:) = colPc;   % Best (Green)
+b.CData(3,:) = colTmax; % Worst (Red)
+set(gca, 'XTickLabel', {'Base','Best','Worst'}); 
+ylabel('Time (s)'); apply_fig_style();
+export_png(f5, fullfile(fig_out_dir, 'Fig5_Time_Comparison.png'));
+
+fprintf('\n모든 그래프가 요청하신 스타일로 개별 저장되었습니다.\n');
+%% ======================= Helper Functions ==========================
+
+function R = run_pulse_case_window(model, duty, Tper, Irest, S2start, S2dur, ...
+                                   t_cycling, dt_out, studyTag, dset)
+    % COMSOL 파라미터 업데이트
+    model.param.set('duty_cycle', num2str(duty));
+    model.param.set('pulse_freq', num2str(Tper));
+    model.param.set('pulse_rest_current_param_coeffi', num2str(Irest));
+    
+    % 중요: CSV에서 추출한 실제 펄스 구간 파라미터 주입
+    model.param.set('S2_start', num2str(S2start)); 
+    model.param.set('S2_dur', num2str(S2dur));     
+    
+    model.param.set('t_cycling', num2str(t_cycling));
+    
+    % 시간 설정
+    tlist_str = sprintf('range(0,%g,t_cycling)', dt_out);
+    set_tlist_safe(model, studyTag, tlist_str);
+    
+    % 실행
+    model.study(studyTag).run();
+    
+    % 데이터 추출
+    expr = {'t','E_cell','liion.cdc1.Icell','liion.Ect','T_avg','T_max','T_min', ...
+            'liion.Qh','plating_cap','liion.cdc1.CC_CH','liion.cdc1.CV_CH'};
+    D = mpheval(model, expr, 'dataset', dset, 'edim','point', ...
+                'selection', 2, 'solnum','all');
+    
+    t = D.d1; E = D.d2; I = D.d3; v = D.d4;
+    Tavg = toCol(D,5); Tmax = toCol(D,6); Tmin = toCol(D,7);
+    Qh = toCol(D,8); pc = toCol(D,9);
+    cc = toCol(D,10); cv = toCol(D,11);
+    
+    idx = (cc==1) | (cv==1);
+    if ~any(idx), idx = true(size(t)); end
+    
+    R = struct('t',t(idx),'E',E(idx),'I',I(idx),'vdiff',v(idx), ...
+               'Tavg',Tavg(idx),'Tmax',Tmax(idx),'Tmin',Tmin(idx), ...
+               'Qh',Qh(idx),'pc',pc(idx));
+end
+
+function export_png(fig_handle, outpath)
+    try
+        exportgraphics(fig_handle, outpath, 'Resolution', 220);
+    catch ME
+        warning('PNG 저장 실패: %s', ME.message);
+    end
+end
+
+function set_tlist_safe(model, studyTag, tlist_str)
+    tried = false;
+    for cand = {'time','time1','time2','step1','step2'}
+        try
+            model.study(studyTag).feature(char(cand)).set('tlist', tlist_str);
+            tried = true; break;
+        catch
+        end
+    end
+    if ~tried, warning('tlist 설정 실패: %s', studyTag); end
+end
+
+function col = toCol(D, k)
+    try col = D.(['d' num2str(k)]); catch col = nan(size(D.d1)); end
+end
+
+function apply_fig_style()
+    ax = gca; set(ax, 'FontSize', 28);
+    if ~isempty(ax.XLabel), ax.XLabel.FontSize = 30; end
+    if ~isempty(ax.YLabel), ax.YLabel.FontSize = 30; end
+    lgd = findobj(gcf, 'Type','Legend');
+    if ~isempty(lgd), set(lgd, 'FontSize', 28); end
+    box on; grid off;
+end
