@@ -1,0 +1,78 @@
+clear; clc; close all
+
+%% 0) 폴더 설정 및 CSV 선택
+% 입력 기본 경로
+base_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Pulse_Grid\second_opt';
+
+% 메인 저장 폴더 (이 폴더 안에 실행 시마다 하위 폴더가 생깁니다)
+main_save_dir = 'G:\공유 드라이브\Battery Software Group (2025)\Members\최은식\COMSOL\Pulse_Grid\secong_opt_post_figure_scatter';
+
+% --- [핵심 수정] 실행 시각을 이름으로 하는 하위 폴더 생성 ---
+% 형식: Results_20231223_153022 (년월일_시분초)
+timestamp = datestr(now, 'yyyymmdd_HHMMSS');
+current_run_dir = fullfile(main_save_dir, ['Run_', timestamp]);
+
+if ~isfolder(current_run_dir)
+    mkdir(current_run_dir);
+    fprintf('이번 실행 결과는 다음 폴더에 저장됩니다:\n%s\n', current_run_dir);
+end
+
+% 파일 선택 창
+if ~isfolder(base_dir), base_dir = pwd; end 
+[fn, fp] = uigetfile(fullfile(base_dir, '*.csv'), 'Pulse Grid CSV 파일을 선택하세요');
+if isequal(fn, 0), error('파일 선택이 취소되었습니다.'); end
+fullpath_csv = fullfile(fp, fn);
+
+%% 1) 데이터 로드
+T_data = readtable(fullpath_csv);
+
+period_all = T_data.pulse_period_s;
+duty_all   = T_data.duty;
+tavg_all   = T_data.T_avg - 273.15; % 켈빈 -> 섭씨
+plat_all   = T_data.d_plating;
+time_all   = T_data.t;      
+crate_all  = T_data.C_rate;
+
+%% 2) C-rate별 그룹화 및 루프 플롯
+unique_crates = unique(crate_all);
+num_crates = numel(unique_crates);
+fprintf('발견된 C-rate 종류: %d개\n', num_crates);
+
+for i = 1:num_crates
+    current_crate = unique_crates(i);
+    idx = (crate_all == current_crate);
+    crate_str = sprintf('%.4f', current_crate);
+    
+    % --- 그래프 1: 플레이팅 발생량 ---
+    fig_title1 = sprintf('C-rate: %s | Color: Plating Capacity', crate_str);
+    f1 = figure('Color', 'w', 'Name', fig_title1, 'Position', [100, 200, 600, 500], 'Visible', 'on');
+    
+    scatter3(period_all(idx), duty_all(idx), tavg_all(idx), 60, plat_all(idx), 'filled', 'MarkerEdgeColor', 'k');
+    grid on; view(45, 30);
+    xlabel('Pulse Period (s)'); ylabel('Duty Cycle'); zlabel('T_{avg} (^\circC)');
+    title(fig_title1);
+    colorbar; colormap(jet);
+    
+    % 현재 실행 폴더(current_run_dir)에 저장
+    saveas(f1, fullfile(current_run_dir, sprintf('Crate_%s_Plating.png', crate_str)));
+    
+    % --- 그래프 2: 충전 시간 (T) ---
+    fig_title2 = sprintf('C-rate: %s | Color: Charging Time', crate_str);
+    f2 = figure('Color', 'w', 'Name', fig_title2, 'Position', [720, 200, 600, 500], 'Visible', 'on');
+    
+    scatter3(period_all(idx), duty_all(idx), tavg_all(idx), 60, time_all(idx), 'filled', 'MarkerEdgeColor', 'k');
+    grid on; view(45, 30);
+    xlabel('Pulse Period (s)'); ylabel('Duty Cycle'); zlabel('T_{avg} (^\circC)');
+    title(fig_title2);
+    colorbar; colormap(parula);
+    
+    % 현재 실행 폴더(current_run_dir)에 저장
+    saveas(f2, fullfile(current_run_dir, sprintf('Crate_%s_Time.png', crate_str)));
+    
+    % 화면이 너무 복잡해지지 않게 저장 후 닫기 (원치 않으시면 주석 처리하세요)
+    % close(f1); close(f2);
+    
+    fprintf('C-rate %s 저장 완료\n', crate_str);
+end
+
+fprintf('\n총 %d개의 결과가 다음 폴더에 저장되었습니다:\n%s\n', num_crates*2, current_run_dir);
